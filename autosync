@@ -1,0 +1,120 @@
+#!/usr/bin/python
+"""
+Utility for archiving snapshots of a remote folder to a local
+directory. Written for Redline Films by Julian Applebaum.
+"""
+
+from datetime import datetime
+from subprocess import call, check_call, CalledProcessError
+import sys, os, shutil, smtplib
+
+conf_fields = [ 'server_name',
+                'username',   
+                'remote_path',
+                'num_snapshots',    
+                'send_errors_to',
+                'send_errors_from',
+                'smtp_server',
+                'smtp_user',
+                'smtp_password' ]
+                     
+class ParseError(Exception):
+    pass
+
+def parse_conf(conf):
+    """
+    Parse a .autosync configuration file
+    """
+    attrs = {}
+    keys = set()
+    
+    try:
+        for line in conf:
+            (name, value) = line.split(":")
+            value = value.strip()
+            name = name.strip()
+            attrs[name] = value
+            keys.add(name)
+    except IndexError:
+        raise ParseError
+        
+    for field in conf_fields:
+        if field not in keys:
+            raise ParseError
+    
+    return attrs
+
+def send_error_msg(err, prefs, url):
+    smtp = smtplib.SMTP()
+    smtp.connect(prefs['smtp_server'], 26)
+    smtp.login(prefs['smtp_user'], prefs['smtp_password'])
+    subject = "Backup of %s failed" % url
+    date = datetime.now().strftime("%m/%d/%Y %H:%M")
+    msg_tpl = """From: %s
+To: %s
+Subject: %s
+Date: %s
+
+%s
+"""
+    msg = msg_tpl % ( "autosync <%s>" % prefs['send_errors_from'], 
+                      prefs['send_errors_to'], 
+                      subject, 
+                      date, 
+                      err)
+    
+    print msg
+    
+    smtp.sendmail(prefs['send_errors_from'], [prefs['send_errors_to']], msg)
+
+def main(path):
+    url = "*unknown*"
+    path = path if path[-1] == "/" else path + "/"
+    
+    try:
+        conf = open("%s.autosync" % path)
+    except IOError:
+        sys.stderr.write("Missing .autosync file in %s\n" % path)
+        return
+    
+    try:
+        prefs = parse_conf(conf)
+    except ParseError:
+        sys.stderr.write("Invalid .autosync file in %s\n" % path)
+        return
+       
+    files = filter(lambda fn: fn[0] != ".", os.listdir(path))
+    files = map(lambda fn: "%s%s" % (path, fn), files)
+    files.sort(key=lambda fn: os.stat(fn).st_mtime)
+    
+    today = datetime.now().strftime("%m-%d-%y.%H_%M_%S")
+    today_path = "%s%s" % (path, today)        
+    os.mkdir(today_path)
+    
+    if len(files) > 0:
+        latest = files[-1]        
+        # need to call cp manually to preserve metadata
+        call("cp -r %s %s" % (latest+"/*", today_path), shell=True)
+    
+    base_cmd = "rsync -avz -e ssh "
+    addr = "%s@%s:%s " % (prefs['username'], prefs['server_name'], prefs['remote_path'])
+    rsync_status = True
+    
+    try:
+        check_call(base_cmd + addr + today_path, shell=True)
+    except CalledProcessError, err:
+        url = "%s/%s" % (prefs['server_name'], prefs['remote_path'])
+        send_error_msg(str(err), prefs, url)
+        rsync_status = False
+    
+    if rsync_status and len(files) > int(prefs['num_snapshots'])-1:
+        earliest = files[0]
+        shutil.rmtree(earliest)
+        
+        
+if __name__ == '__main__':
+    if len(sys.argv) != 2:
+        sys.stderr.write("Usage: autosync path/to/folder\n")
+        exit()
+        
+    main(sys.argv[1])
