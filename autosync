@@ -45,6 +45,9 @@ def parse_conf(conf):
     return attrs
 
 def send_error_msg(err, prefs, url):
+    """
+    Send an email with the full rsync command and its error code
+    """
     smtp = smtplib.SMTP()
     smtp.connect(prefs['smtp_server'], 26)
     smtp.login(prefs['smtp_user'], prefs['smtp_password'])
@@ -80,7 +83,9 @@ def main(path):
     except ParseError:
         sys.stderr.write("Invalid .autosync file in %s\n" % path)
         return
-       
+    
+    # filter out UNIX system files, give everything a full path,
+    # and sort be date modified
     files = filter(lambda fn: fn[0] != ".", os.listdir(path))
     files = map(lambda fn: "%s%s" % (path, fn), files)
     files.sort(key=lambda fn: os.stat(fn).st_mtime)
