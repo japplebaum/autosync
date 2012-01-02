@@ -1,7 +1,7 @@
 #!/usr/bin/python
 """
 Utility for archiving snapshots of a remote folder to a local
-directory. Written for Redline Films by Julian Applebaum.
+directory. Written for Redline Films, Inc. by Julian Applebaum.
 """
 
 from datetime import datetime
@@ -48,7 +48,7 @@ def send_error_msg(err, prefs, url):
     smtp = smtplib.SMTP()
     smtp.connect(prefs['smtp_server'], 26)
     smtp.login(prefs['smtp_user'], prefs['smtp_password'])
-    subject = "Backup of %s failed" % url
+    subject = "Error while backing up %s" % url
     date = datetime.now().strftime("%m/%d/%Y %H:%M")
     msg_tpl = """From: %s
 To: %s
@@ -62,9 +62,7 @@ Date: %s
                       subject, 
                       date, 
                       err)
-    
-    print msg
-    
+        
     smtp.sendmail(prefs['send_errors_from'], [prefs['send_errors_to']], msg)
 
 def main(path):
@@ -88,7 +86,7 @@ def main(path):
     files.sort(key=lambda fn: os.stat(fn).st_mtime)
     
     today = datetime.now().strftime("%m-%d-%y.%H_%M_%S")
-    today_path = "%s%s" % (path, today)        
+    today_path = "%s%s" % (path, today)
     os.mkdir(today_path)
     
     if len(files) > 0:
@@ -96,7 +94,7 @@ def main(path):
         # need to call cp manually to preserve metadata
         call("cp -r %s %s" % (latest+"/*", today_path), shell=True)
     
-    base_cmd = "rsync -avz -e ssh "
+    base_cmd = "rsync -r -avz -e ssh "
     addr = "%s@%s:%s " % (prefs['username'], prefs['server_name'], prefs['remote_path'])
     rsync_status = True
     
