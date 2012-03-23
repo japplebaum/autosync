@@ -1,4 +1,5 @@
 #!/usr/bin/python
+
 """
 Utility for archiving snapshots of a remote folder to a local
 directory. Written for Redline Films, Inc. by Julian Applebaum.
@@ -6,18 +7,34 @@ directory. Written for Redline Films, Inc. by Julian Applebaum.
 
 from datetime import datetime
 from subprocess import call, check_call, CalledProcessError
-import sys, os, shutil, smtplib
+import sys, os, shutil, smtplib, re
 
-conf_fields = [ 'server_name',
-                'username',   
+"""
+Percent capacity that we'll let the disk reach before bailing out
+"""
+CAP_THRESHOLD = 95
+
+"""
+rsync errors that we're willing to ignore.
+- 24: partial transfer due to vanished source files
+      - OK because we're backing up emails, and those files
+        are likely to change during the backup process (eg.
+        employees deleting spam)
+"""
+IGNORABLE_ERRORS = [24]
+
+ERROR_INTRO = "The backup could not be completed "
+
+CONF_FIELDS = [ 'server_name',
+                'username',
                 'remote_path',
-                'num_snapshots',    
+                'num_snapshots',
                 'send_errors_to',
                 'send_errors_from',
                 'smtp_server',
                 'smtp_user',
                 'smtp_password' ]
-                     
+
 class ParseError(Exception):
     pass
 
@@ -27,7 +44,7 @@ def parse_conf(conf):
     """
     attrs = {}
     keys = set()
-    
+
     try:
         for line in conf:
             (name, value) = line.split(":")
@@ -37,12 +54,29 @@ def parse_conf(conf):
             keys.add(name)
     except IndexError:
         raise ParseError
-        
-    for field in conf_fields:
+
+    for field in CONF_FIELDS:
         if field not in keys:
             raise ParseError
-    
+
     return attrs
+
+
+def at_capacity(path, threshold):
+    """
+    Returns true if the volume contain path is  at [threshold]%% or higher
+    capacity, false otherwise. Only works on *NIX.
+    """
+
+    stats = ""
+    stdout = os.popen("df -b %s" % path)
+
+    for line in stdout:
+        stats += line
+
+    used = int(re.split(r"\s+", stats.strip().split("\n")[1])[4].replace("%", ""))
+    return used > threshold
+
 
 def send_error_msg(err, prefs, url):
     """
@@ -60,64 +94,75 @@ Date: %s
 
 %s
 """
-    msg = msg_tpl % ( "autosync <%s>" % prefs['send_errors_from'], 
-                      prefs['send_errors_to'], 
-                      subject, 
-                      date, 
+    msg = msg_tpl % ( "autosync <%s>" % prefs['send_errors_from'],
+                      prefs['send_errors_to'],
+                      subject,
+                      date,
                       err)
-        
+
     smtp.sendmail(prefs['send_errors_from'], [prefs['send_errors_to']], msg)
 
 def main(path):
     url = "*unknown*"
     path = path if path[-1] == "/" else path + "/"
-    
+
     try:
         conf = open("%s.autosync" % path)
     except IOError:
         sys.stderr.write("Missing .autosync file in %s\n" % path)
         return
-    
+
     try:
         prefs = parse_conf(conf)
     except ParseError:
         sys.stderr.write("Invalid .autosync file in %s\n" % path)
         return
-    
+
+    url = "%s/%s" % (prefs['server_name'], prefs['remote_path'])
+
+    # if the disk has less than 10% capacity left, bail out
+    if at_capacity(path, CAP_THRESHOLD):
+        msg =  ERROR_INTRO + ("because the disk containing %s is at %i%% capacity." %
+               (path, CAP_THRESHOLD))
+        sys.stderr.write(msg + "\n")
+        send_error_msg(msg, prefs, url)
+        return
+
     # filter out UNIX system files, give everything a full path,
-    # and sort be date modified
+    # and sort by date modified
     files = filter(lambda fn: fn[0] != ".", os.listdir(path))
     files = map(lambda fn: "%s%s" % (path, fn), files)
     files.sort(key=lambda fn: os.stat(fn).st_mtime)
-    
+
     today = datetime.now().strftime("%m-%d-%y.%H_%M_%S")
     today_path = "%s%s" % (path, today)
     os.mkdir(today_path)
-    
+
     if len(files) > 0:
-        latest = files[-1]        
+        latest = files[-1]
         # need to call cp manually to preserve metadata
         call("cp -r %s %s" % (latest+"/*", today_path), shell=True)
-    
+
     base_cmd = "rsync -r -avz -e ssh "
     addr = "%s@%s:%s " % (prefs['username'], prefs['server_name'], prefs['remote_path'])
     rsync_status = True
-    
+
     try:
         check_call(base_cmd + addr + today_path, shell=True)
     except CalledProcessError, err:
-        url = "%s/%s" % (prefs['server_name'], prefs['remote_path'])
-        send_error_msg(str(err), prefs, url)
-        rsync_status = False
-    
+        if (err.returncode not in IGNORABLE_ERRORS):
+            intro = ERROR_INTRO + "due to an error during the transfer process. " + \
+                    "Here is the output of the rsync command: \n\n"
+            send_error_msg(intro + str(err), prefs, url)
+            rsync_status = False
+
     if rsync_status and len(files) > int(prefs['num_snapshots'])-1:
         earliest = files[0]
         shutil.rmtree(earliest)
-        
-        
+
 if __name__ == '__main__':
     if len(sys.argv) != 2:
         sys.stderr.write("Usage: autosync path/to/folder\n")
         exit()
-        
+
     main(sys.argv[1])
